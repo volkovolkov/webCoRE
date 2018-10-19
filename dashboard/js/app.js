@@ -1,4 +1,4 @@
-var app = angular.module('webCoRE', ['ng', 'ngRoute', 'ngSanitize', 'ngResource', 'ngDialog', 'ngAnimate', 'angular-svg-round-progressbar', 'angular-bootstrap-select', 'swipe', 'dndLists', 'ui.toggle', 'chart.js', 'smartArea', 'ui.bootstrap.contextMenu', 'ngFitText', 'googlechart', 'ngMap']);
+var app = angular.module('webCoRE', ['ng', 'ngRoute', 'ngSanitize', 'ngResource', 'ngDialog', 'ngAnimate', 'angular-svg-round-progressbar', 'angular-bootstrap-select', 'swipe', 'dndLists', 'ui.toggle', 'chart.js', 'smartArea', 'ui.bootstrap.contextMenu', 'ngFitText', 'googlechart', 'ngMap', 'monospaced.elastic']);
 //var cdn = 'https://core.homecloudhub.com/dashboard/';
 var cdn = '';
 var theme = '';
@@ -397,6 +397,18 @@ app.directive('taskedit', function() {
 	};
 });
 
+app.directive('checkbox', function() {
+	return {
+		restrict: 'E',
+		scope: {
+			checked: '=',
+			iconClass: '@',
+			radio: '=',
+		},
+		template: '<i ng-if="checked" ng-class="iconClass + \' fa-check-\' + (radio ? \'circle\' : \'square\')" class="far no-ng-animate"></i><i ng-if="!checked" ng-class="iconClass + \' fa-\' + (radio ? \'circle\' : \'square\')" class="far no-ng-animate"></i>'
+	};
+});
+
 app.filter('orderObjectBy', function() {
   return function(items, field, reverse) {
     var filtered = [];
@@ -573,6 +585,10 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 
 	dataService.encryptBackup = function(obj, password) {
 		return encryptObject(obj, _ek + (password ? password : ''));
+	}
+
+	dataService.decryptBackup = function(obj, password) {
+		return decryptObject(obj, _ek + (password ? password : ''));
 	}
 
     var decryptObject = function(data, ek) {
@@ -1089,6 +1105,30 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 			}
         });
     }
+    
+    dataService.getImportedData = function() {
+      return localforage.getItem('import');
+    }
+    
+    dataService.setImportedData = function(importedData) {
+      return localforage.setItem('import', importedData);
+    }
+    
+    dataService.clearImportedData = function() {
+      return localforage.removeItem('import');
+    }
+    
+    dataService.loadFromImport = function (pistonId) {
+      status('Loading piston from import...');
+      return $q.resolve(localforage.getItem('import')).then(function(pistons) {
+        status();
+        if (pistons && pistons.length > 0) {
+          return pistons.find(function(data) {
+            return data.meta.id === pistonId;
+          }) || null;
+        }
+      });
+    }
 
 
 
@@ -1140,8 +1180,10 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 		}
 		if (saveToBinOnly) return;
 		if (data.length > maxChunkSize) {
-			//var chunks = data.match(/.{1,maxChunkSize}/g);
-			var chunks = [].concat.apply([],data.split('').map(function(x,i){ return i%maxChunkSize ? [] : data.slice(i,i+maxChunkSize) }, data));
+			var chunks = [];
+			for (var i = 0; i < data.length; i += maxChunkSize) {
+				chunks.push(data.slice(i, i + maxChunkSize))
+			}
 			status('Preparing to save chunked piston...');
 	    	return $http.jsonp((si ? si.uri : 'about:blank/') + 'intf/dashboard/piston/set.start?' + getAccessToken(si) + 'id=' + piston.id + '&chunks=' + chunks.length.toString() + '&token=' + (si && si.token ? si.token : ''), {jsonpCallbackParam: 'callback'})
 				.then(function(response) {
@@ -1806,13 +1848,18 @@ function renderString($sce, value) {
                         while (/(\bsrc=\S+),/.test(cls)) {
                           cls = cls.replace(/(\bsrc=\S+),/, '$1:webCoRE-comma:');
                         }
-                        cls = cls.replace(/\s+/g, ',').split(',');
+                        cls = cls.replace(/'.*? .*?'|".*? .*?"/g, function(match) {
+                            return match.replace(/\s+/g, ':webCoRE-space:');
+                        })
+                        cls = cls.split(/,|\s+/);
                         var className = '';
                         var color = '';
+						var attributes = '';
 						var backColor='';
 						var fontSize = '';
                         for (x in cls) {
 							if (!cls[x]) continue;
+                            cls[x] = cls[x].replace(/:webCoRE-comma:/g, ',').replace(/:webCoRE-space:/g, ' ');
                             switch (cls[x]) {
                                 case 'b': 
                                 case 'u':
@@ -1843,25 +1890,28 @@ function renderString($sce, value) {
                                 default:
 									if (/^\d+(\.\d+)?(x|em)/.test(cls[x])) {
 										fontSize = cls[x].replace('x', 'em');
-									} else if (cls[x].startsWith('b-')) {
-										backColor = cls[x].substr(2).replace(/[^#0-9a-z]/gi, '');
-									} else if (cls[x].startsWith('bk-') || cls[x].startsWith('bg-')) {
-										backColor = cls[x].substr(3).replace(/[^#0-9a-z]/gi, '');
-									} else if (cls[x].startsWith('back-')) {
-										backColor = cls[x].substr(5).replace(/[^#0-9a-z]/gi, '');
+									} else if (cls[x].startsWith('fa-')) {
+										className += cls[x] + ' ';
+									} else if (cls[x].startsWith('data-fa-')) {
+										attributes += ' ' + cls[x];
+									} else if (cls[x].startsWith('color-')) {
+										color = cls[x].substr(6);
+									} else if (/^(b|bg|bk|back)-/.test(cls[x])) {
+										backColor = cls[x].replace(/^(b|bg|bk|back)-/, '');
 									} else if (cls[x].indexOf('=') > 0) {
 										//options
 										var p = cls[x].indexOf('=');
-										meta.options[cls[x].substr(0, p)] = cls[x].substr(p + 1).replace(/:webCoRE-comma:/g, ',');
+										meta.options[cls[x].substr(0, p)] = cls[x].substr(p + 1);
 									} else {
 										color = cls[x].replace(/[^#0-9a-z]/gi, '');
 									}
                             }
                         }
+						meta.attributes = attributes;
 						meta.className = className;
 						meta.color = color;
 						meta.backColor = backColor;
-                        return '<span ' + (className ? 'class="' + className + '" ' : '') + (!!color || !!backColor || !!fontSize ? 'style="' + (color ? 'color: ' + color + ' !important;' : '') + ' ' + (backColor ? 'background-color: ' + backColor + ' !important;' : '') + ' ' + (fontSize ? 'font-size: ' + fontSize + ' !important;' : '') + '"' : '') + '>' + result + '</span>';
+                        return '<span ' + (className ? 'class="' + className + '" ' : '') + (!!color || !!backColor || !!fontSize ? 'style="' + (color ? 'color: ' + color + ' !important;' : '') + ' ' + (backColor ? 'background-color: ' + backColor + ' !important;' : '') + ' ' + (fontSize ? 'font-size: ' + fontSize + ' !important;' : '') + '"' : '') + attributes + '>' + result + '</span>';
                     default:
                         result += c;
                 }
@@ -1870,19 +1920,20 @@ function renderString($sce, value) {
             return result;
         }
 
-		meta.html = process(value).replace(/\:fa-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fa ' + match.replace(/\:/g, '').toLowerCase() + '"></i>';
-        }).replace(/\:fa5-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fa5 ' + match.replace(/\:/g, '').replace(/fa5\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fal-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fal ' + match.replace(/\:/g, '').replace(/fal\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:far-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="far ' + match.replace(/\:/g, '').replace(/far\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fas-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fas ' + match.replace(/\:/g, '').replace(/fas\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:fab-([a-z0-9\-\s]*)\:/gi, function(match) {
-            return '<i class="fab ' + match.replace(/\:/g, '').replace(/fab\-/g, 'fa5-').toLowerCase() + '"></i>';
-        }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match) {
+		meta.html = process(value).replace(/\:(fa[blrs5]?)([ -])([a-z0-9\-\s.="']*)\:/gi, function(match, prefix, union, classes) {
+            var attributes = '';
+            // Default deprecated fa5 prefix to solid weight
+            prefix = prefix.toLowerCase();
+            prefix = prefix === 'fa5' ? 'fas' : prefix;
+            // Support shorthand fas-stroopwafel for fas fa-stroopwafel
+            classes = classes.toLowerCase();
+            classes = union === '-' ? 'fa-' + classes : classes;
+            classes = classes.replace(/(data-fa.*?=(?:'.*?'|".*?"))\s*/gi, function(match) {
+                attributes += ' ' + match;
+                return '';
+            });
+            return '<i class="' + prefix.toLowerCase() + ' ' + classes.toLowerCase() + '"' + attributes + '></i>';
+      }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match) {
 			var iconSet = match[4];
 			if (iconSet == 'v') {
 				iconSet += match[5];
@@ -2038,6 +2089,64 @@ if (document.selection) {
      document.execCommand("Copy");
 }}
 
+function loadFontAwesomeFallback() {
+  fontAwesomePro = false;
+  $('head script[src*="pro.fontawesome"]').each(function() {
+    $(this).remove().clone()
+      .attr({
+        src: this.src.replace('pro', 'use'),
+      }).removeAttr('onerror')
+      .appendTo('head');
+  });
+}
+
+// Handle Pro load failure before app loads
+if (!window.fontAwesomePro) {
+  loadFontAwesomeFallback();
+}
+
+
+// Map .far to .fas free icons when Pro is not available
+app.directive('far', function() {
+	var directive = {
+		restrict: 'C',
+		link: function(scope, element) {
+			if (!fontAwesomePro) {
+				element.toggleClass('far fas');
+			}
+		}
+	};
+	return directive;
+});
+
+// Map .fal to .fas free icons when Pro is not available
+app.directive('fal', function() {
+	var directive = {
+		restrict: 'C',
+		link: function(scope, element) {
+			if (!fontAwesomePro) {
+				element.toggleClass('fal fas');
+			}
+		}
+	};
+	return directive;
+});
+
+// For use with data-fa-symbol, older versions of Firefox require the full 
+// pathname in the href
+app.directive('spriteIcon', ['$sce', function($sce) {
+	return {
+		restrict: 'C',
+		scope: {
+			symbol: '@'
+		},
+		link: function(scope) {
+			scope.href = $sce.trustAsUrl(window.location.pathname + '#' + scope.symbol);
+		},
+		template: '<use xlink:href="{{href}}"></use>',
+	};
+}]);
+
 // Polyfills
 if (!String.prototype.endsWith) {
 	String.prototype.endsWith = function(search, this_len) {
@@ -2048,4 +2157,4 @@ if (!String.prototype.endsWith) {
 	};
 }
 
-version = function() { return 'v0.3.105.20180628'; };
+version = function() { return 'v0.3.108.20180906'; };
