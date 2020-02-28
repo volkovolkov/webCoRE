@@ -648,6 +648,7 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 			instance.devices = inst.devices;
 			initial = true;
 		}
+		instance.deviceVersion = inst.deviceVersion;
 		instance.devices = instance.devices ? instance.devices : (instances[instance.id] && instances[instance.id].devices ? instances[instance.id].devices : []);
 		if (!!instance.pistons) {
 			for (i = 0; i < inst.pistons.length; i++) {
@@ -931,17 +932,49 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 				if (data.location) {
 					setLocation(data.location);
 				}
-				if (data.instance) {
-					data.instance = setInstance(data.instance);
-				}
 				data.endpoint = si.uri;
 				data.accessToken = si.accessToken;
+				if (data.instance && !data.instance.devices && data.instance.deviceVersion !== deviceVersion) {
+					return dataService.getDevices(data.instance).then(function(devices) {
+						data.instance.devices = devices;
+						return data;
+					});
+				}
 				return data;	
 			}, function(error) {
 				status('There was a problem loading the dashboard data. The data shown below may be outdated; please log out if this problem persists.');
 				return error;
+			}).then(function(data) {
+				if (data.instance) {
+					data.instance = setInstance(data.instance);
+				}
+				return data;
 			});
     };
+
+	dataService.getDevices = function(inst, offset, devices) {
+		var si = inst ? store[inst.id] : null;
+		offset = offset || 0;
+		devices = devices || {};
+		return $http.jsonp(
+			(si ? si.uri : 'about:blank/') + 'intf/dashboard/devices?' + getAccessToken(si) + 'token=' + (si && si.token ? si.token : '') + '&offset=' + offset, 
+			{jsonpCallbackParam: 'callback'}
+		).then(function(response) {
+			var data = response.data;
+			if (data.error) {
+				status('There was a problem loading your devices. Please log out and try again.');
+				return null;
+			}
+			Object.assign(devices, data.devices);
+			if (!data.complete) {
+				return dataService.getDevices(inst, data.nextOffset, devices);
+			}
+			return devices;
+		}, function(error) {
+			status('There was a problem loading your devices. The data shown below may be outdated; please refresh the page to try again.');
+			return null;
+		});
+	}
 
     dataService.tap = function (tapId) {
         return $http({
@@ -978,11 +1011,26 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
         var dbVersion = readObject('db.version', _dk);
 		status('Loading piston...');
     	return $http.jsonp((si ? si.uri : 'about:blank/') + 'intf/dashboard/piston/get?' + getAccessToken(si) + 'id=' + pistonId + '&db=' + dbVersion + '&token=' + (si && si.token ? si.token : '') + '&dev=' + deviceVersion, {jsonpCallbackParam: 'callback'})
+			// Base response is no longer included with the piston
+			.then(function(response) {
+				var data = response.data;
+				if (!data.instance) {
+					return dataService.loadInstance(inst).then(function(instData) {
+						const mergedData = Object.assign({}, data, instData);
+						return Object.assign({}, response, { data: mergedData });
+					});
+				}
+
+				if (data.location) {
+					setLocation(data.location);
+				}
+				if (data.instance) {
+					data.instance = setInstance(data.instance);
+				}
+				return response;
+			})
 			.then(function(response) {
 				data = response.data;
-				if (data.now) {
-					adjustTimeOffset(data.now);
-				}
 				if (data.dbVersion) {
 					writeObject('db.version', data.dbVersion, _dk);
 					writeObject('db', data.db);
@@ -991,13 +1039,6 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 					data.db = readObject('db');
 					status();
 				}
-				if (data.location) {
-					setLocation(data.location);
-				}
-				if (data.instance) {
-					data.instance = setInstance(data.instance);
-				}
-				data.endpoint = si.uri;
 				return data;
 			}, function(error) {
 				return null;
@@ -1375,21 +1416,50 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 	dataService.listFuelStreams = function() {
 		var instance = dataService.getInstance();
 		if (instance) {
-			var iid = instance.id;
-			var si = store[instance.id];
-			if (!si) si = {};
-			var region = (si && si.uri && si.uri.startsWith('https://graph-eu')) ? 'eu' : 'us';
-			var req = {
-				method: 'POST',
-				url: 'https://api-' + region + '-' + iid[32] + '.webcore.co:9287/fuelStreams/list',
-				headers: {
-				'Auth-Token': '|'+ iid
-				},
-				data: { i: iid }
+			var urls = instance.fuelStreamUrls;
+			var jsonp = false;
+			var req;
+			
+			if(urls){
+				var params = urls.list;
+				
+				if(params.l){
+					jsonp = true;
+					req = params.u;
+				}
+				else {
+					req = {
+						method: params.m,
+						url: params.u,
+						headers: params.h,
+						data: params.d
+					}
+				}
 			}
-			return $http(req).then(function(response) {
+			else {
+				var iid = instance.id;
+				var si = store[instance.id];
+				if (!si) si = {};
+				var region = (si && si.uri && si.uri.startsWith('https://graph-eu')) ? 'eu' : 'us';
+				req = {
+					method: 'POST',
+					url: 'https://api-' + region + '-' + iid[32] + '.webcore.co:9287/fuelStreams/list',
+					headers: {
+					'Auth-Token': '|'+ iid
+					},
+					data: { i: iid }
+				}
+			}
+			if(jsonp){
+				return $http.jsonp(req,{jsonpCallbackParam: 'callback'}).then(function(response) {
+						return response.data;
+					});
+			}
+			else {
+				return $http(req).then(function(response) {
 					return response.data;
 				});
+			}
 		}
 	}
 
@@ -1438,21 +1508,53 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 	dataService.listFuelStreamData = function(fuelStreamId) {
 		var instance = dataService.getInstance();
 		if (instance) {
-			var iid = instance.id;
-			var si = store[instance.id];
-			if (!si) si = {};
-			var region = (si && si.uri && si.uri.startsWith('https://graph-eu')) ? 'eu' : 'us';
-			var req = {
-				method: 'POST',
-				url: 'https://api-' + region + '-' + iid[32] + '.webcore.co:9287/fuelStreams/get',
-				headers: {
-				'Auth-Token': '|'+iid
-				},
-				data: { i: iid, f: fuelStreamId }
+			var urls = instance.fuelStreamUrls;
+			var jsonp = false;
+			var req;
+			
+			if(urls){
+				var params = urls.get;
+				
+				if(params.l){
+					jsonp = true;
+					req = params.u.replace("{" + params.p + "}", fuelStreamId);
+				}
+				else {
+					var data = params.d
+					data[params.p] = fuelStreamId;
+					
+					req = {
+						method: params.m,
+						url: params.u,
+						headers: params.h,
+						data: data
+					}
+				}
 			}
-			return $http(req).then(function(response) {
+			else {
+				var iid = instance.id;
+				var si = store[instance.id];
+				if (!si) si = {};
+				var region = (si && si.uri && si.uri.startsWith('https://graph-eu')) ? 'eu' : 'us';
+				req = {
+					method: 'POST',
+					url: 'https://api-' + region + '-' + iid[32] + '.webcore.co:9287/fuelStreams/get',
+					headers: {
+					'Auth-Token': '|'+iid
+					},
+					data: { i: iid, f: fuelStreamId }
+				}
+			}
+			if(jsonp){
+				return $http.jsonp(req,{jsonpCallbackParam: 'callback'}).then(function(response) {
+						return response.data;
+					});
+			}
+			else {
+				return $http(req).then(function(response) {
 					return response.data;
 				});
+			}
 		}
 	}
 
@@ -1933,17 +2035,18 @@ function renderString($sce, value) {
                 return '';
             });
             return '<i class="' + prefix.toLowerCase() + ' ' + classes.toLowerCase() + '"' + attributes + '></i>';
-      }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match) {
-			var iconSet = match[4];
-			if (iconSet == 'v') {
-				iconSet += match[5];
-				var icon = match.substr(7, match.length - 8);
-	            return '<img class="wu" src="https://icons.wxug.com/i/c/' + iconSet + '/' + icon + '.svg" />';
-			} else {
-				var icon = match.substr(6, match.length - 7);
-	            return '<img class="wu" src="https://icons.wxug.com/i/c/' + iconSet + '/' + icon + '.gif" />';
+      }).replace(/\:wu-([a-k]|v[1-4])-([a-z0-9_\-]+)\:/gi, function(match, iconSet, icon) {
+			var ext = iconSet[0] === 'v' ? '.svg' : '.gif';
+			// Convert numeric codes for icon sets that do not support them
+			if (icon == +icon) {
+            // Only v4 supports the numeric codes
+				icon = iconSet === 'v4' ? +icon : (wuIconForTwcCode[+icon] || icon);
 			}
-        }).replace(/(?![^<]*[>])#[a-z0-9]{6}/gi, function(match) {
+			return '<img class="wu" src="https://icons.wxug.com/i/c/' + iconSet + '/' + icon + ext + '" />';
+		}).replace(/\:twc-(\d+)\:/gi, function(match, iconCode) {
+			iconCode = (iconCode.length > 1 ? '' : '0') + iconCode
+			return '<img class="twc wu" src="https://smartthings-twc-icons.s3.amazonaws.com/' + iconCode + '.png" />';
+		}).replace(/(?![^<]*[>])#[a-z0-9]{6}/gi, function(match) {
 			return '<span class="swatch" style="background-color:' + match + '">&nbsp;&nbsp;&nbsp;&nbsp;</span>' + match;
 		}).replace(/\\[rn]/gi, '<br/>');
 		var tmp = document.createElement("DIV");
@@ -1954,6 +2057,56 @@ function renderString($sce, value) {
 		return result;
     };
 
+var wuIconForTwcCode = {
+	0:  'tstorms',          // Tornado
+	1:  'tstorms',          // Tropical Storm
+	2:  'tstorms',          // Hurricane
+	3:  'tstorms',          // Strong Storms
+	4:  'tstorms',          // Thunder and Hail
+	5:  'snow',             // Rain to Snow Showers
+	6:  'sleat',            // Rain / Sleet
+	7:  'sleat',            // Wintry Mix Snow / Sleet
+	8:  'sleat',            // Freezing Drizzle
+	9:  'rain',             // Drizzle
+	10: 'sleat',            // Freezing Rain
+	11: 'chancerain',       // Light Rain
+	12: 'rain',             // Rain
+	13: 'chanceflurries',   // Scattered Flurries
+	14: 'chancesnow',       // Light Snow
+	15: 'chanceflurries',   // Blowing / Drifting Snow
+	16: 'snow',             // Snow
+	17: 'rain',             // Hail
+	18: 'sleat',            // Sleet
+	19: 'unknown',          // Blowing Dust / Sandstorm
+	20: 'hazy',             // Foggy
+	21: 'hazy',             // Haze / Windy
+	22: 'hazy',             // Smoke / Windy
+	23: 'clear',            // Breezy
+	24: 'clear',            // Blowing Spray / Windy
+	25: 'clear',            // Frigid / Ice Crystals
+	26: 'cloudy',           // Cloudy
+	27: 'nt_mostlycloudy',  // Mostly Cloudy (night)
+	28: 'mostlycloudy',     // Mostly Cloudy
+	29: 'nt_partlycloudy',  // Partly Cloudy (night)
+	30: 'partlycloudy',     // Partly Cloudy
+	31: 'nt_clear',         // Clear (night)
+	32: 'sunny',            // Sunny
+	33: 'nt_clear',         // Fair / Mostly Clear (night)
+	34: 'mostlysunny',      // Fair / Mostly Sunny
+	35: 'rain',             // Mixed Rain & Hail
+	36: 'clear',            // Hot
+	37: 'chancetstorms',    // Isolated Thunderstorms
+	38: 'tstorms',          // Thunderstorms
+	39: 'chancerain',       // Scattered Showers
+	40: 'rain',             // Heavy Rain
+	41: 'chancesnow',       // Scattered Snow Showers
+	42: 'snow',             // Heavy Snow
+	43: 'snow',             // Blizzard
+	44: 'unknown',          // Not Available (N/A)
+	45: 'nt_chancerain',    // Scattered Showers (night)
+	46: 'nt_chancesnow',    // Scattered Snow Showers (night)
+	47: 'nt_chancetstorms'  // Scattered Thunderstorms (night)
+};
 
 
 //document.addEventListener('touchstart', handleTouchStart, false);        
@@ -2091,13 +2244,11 @@ if (document.selection) {
 
 function loadFontAwesomeFallback() {
   fontAwesomePro = false;
-  $('head script[src*="pro.fontawesome"]').each(function() {
-    $(this).remove().clone()
-      .attr({
-        src: this.src.replace('pro', 'use'),
-      }).removeAttr('onerror')
-      .appendTo('head');
-  });
+  var shim = $('head script[src*="pro.fontawesome"]').remove().clone().removeAttr('onerror');
+  var faFreeSrc = shim.attr('src').replace('pro', 'use');
+  shim.attr('src', faFreeSrc);
+  shim.clone().attr('src', faFreeSrc.replace('v4-shims', 'all')).appendTo('head');
+  shim.appendTo('head');
 }
 
 // Handle Pro load failure before app loads
@@ -2157,4 +2308,4 @@ if (!String.prototype.endsWith) {
 	};
 }
 
-version = function() { return 'v0.3.108.20180906'; };
+version = function() { return 'v0.3.110.20191009'; };
